@@ -71,7 +71,7 @@ export class SourceMapEntry {
     }
 }
 
-type SourceMapJson = {
+export type SourceMapJson = {
     readonly name: string,
     readonly className: string,
     readonly filePaths?: readonly string[],
