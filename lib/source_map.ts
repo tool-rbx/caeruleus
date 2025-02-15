@@ -1,3 +1,7 @@
+import * as path from "jsr:@std/path";
+
+const CWD: string = Deno.cwd();
+
 export class SourceMapEntry {
     public name: string;
     public readonly children: readonly SourceMapEntry[] = [];
@@ -100,7 +104,10 @@ export class SourceMap {
     private getEntryFromJson(json: SourceMapJson, parent?: SourceMapEntry): SourceMapEntry {
         const entry = new SourceMapEntry(json.name, parent);
         if (json.filePaths) {
-            for (const filePath of json.filePaths) this.pushFilePath(filePath, entry);
+            for (const filePath of json.filePaths) this.pushFilePath(
+                path.isAbsolute(filePath) ? filePath : path.join(CWD, filePath),
+                entry
+            );
         }
         if (json.children) {
             for (const child of json.children) this.getEntryFromJson(child, entry);
