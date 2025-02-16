@@ -31,7 +31,7 @@ export class SourceMapEntry {
         children[previousParentIndex] = last;
     }
 
-    public* getParents(): Generator<SourceMapEntry> {
+    public *getParents(): Generator<SourceMapEntry> {
         let parent = this.parent;
         while (parent) {
             yield parent;
@@ -43,7 +43,7 @@ export class SourceMapEntry {
         return this.children.values();
     }
 
-    public* getDescendants(): Generator<[number, SourceMapEntry]> {
+    public *getDescendants(): Generator<[number, SourceMapEntry]> {
         for (const child of this.children) {
             yield [0, child];
             for (const [depth, descendant] of child.getDescendants()) {
@@ -60,7 +60,7 @@ export class SourceMapEntry {
 
         if (thisParents.pop() !== otherParents.pop()) throw new Error("The entries are unrelated");
 
-        while (thisParents.length > 1 && otherParents.length > 1 && thisParents.at(-1) === otherParents.at(-1)) {
+        while (thisParents.length > 0 && otherParents.length > 0 && thisParents.at(-1) === otherParents.at(-1)) {
             thisParents.pop();
             otherParents.pop();
         }
@@ -76,11 +76,11 @@ export class SourceMapEntry {
 }
 
 export type SourceMapJson = {
-    readonly name: string,
-    readonly className: string,
-    readonly filePaths?: readonly string[],
-    readonly children?: readonly SourceMapJson[],
-}
+    readonly name: string;
+    readonly className: string;
+    readonly filePaths?: readonly string[];
+    readonly children?: readonly SourceMapJson[];
+};
 
 export class SourceMap {
     public readonly filePaths: ReadonlyMap<string, readonly SourceMapEntry[]> = new Map();
@@ -104,10 +104,12 @@ export class SourceMap {
     private getEntryFromJson(json: SourceMapJson, parent?: SourceMapEntry): SourceMapEntry {
         const entry = new SourceMapEntry(json.name, parent);
         if (json.filePaths) {
-            for (const filePath of json.filePaths) this.pushFilePath(
-                path.isAbsolute(filePath) ? filePath : path.join(CWD, filePath),
-                entry
-            );
+            for (const filePath of json.filePaths) {
+                this.pushFilePath(
+                    path.isAbsolute(filePath) ? filePath : path.join(CWD, filePath),
+                    entry,
+                );
+            }
         }
         if (json.children) {
             for (const child of json.children) this.getEntryFromJson(child, entry);
