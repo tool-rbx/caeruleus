@@ -1,279 +1,227 @@
+import { Aliases } from "../lib/aliases.ts";
+import { replaceRequires } from "../lib/script.ts";
+import { SourceMap, SourceMapEntry } from "../lib/source_map.ts";
+
 import * as path from "jsr:@std/path";
-import * as fs from "https://deno.land/std@0.224.0/fs/mod.ts";
+import * as fs from "jsr:@std/fs";
 
-export function getLuauRealPath(filePath: string): string | undefined {
+const CWD: string = Deno.cwd();
+
+export const VERSION: string = "0.1.0";
+
+export function help() {
+    console.log(
+        "%c" + "Caeruleus" + "%c v" + VERSION,
+        "color: blue; font-weight: bold;",
+        "color: blue;",
+    );
+    console.log("/kae̯ˈru.le.us/ is a preprocessor for Luau projects\n");
+    console.log(
+        "%c" + "Usage:",
+        "color: blue;",
+    );
+    console.log(`\t${path.basename(Deno.execPath())} [OPTIONS]\n`);
+    console.log(
+        "%c" + "Options:",
+        "color: blue;",
+    );
+    console.log(
+        "\t-h, --help           \tShow help and exit\n" +
+            "\t-V, --version        \tShow version and exit",
+    );
+    console.log(
+        "\t-W                   \tEnable file watching mode (build on change)",
+    );
+    console.log(
+        "\t-i, --input <input>  \tSet input file or directory\n" +
+            "\t                     \t\t%c" + "If omitted, defaults to ./",
+        "color: black;",
+    );
+    console.log(
+        "\t-o, --output <output>\tSet output file or directory for the preceding input.\n" +
+            "\t                     \t\t%c" + "If omitted, defaults to ./output/<input>.",
+        "color: black;",
+    );
+}
+
+export function fatalError(message: string): never {
+    console.error(`%cFatal Error: %c${message}`, "color: red; font-weight: bold;", "");
+    Deno.exit(1);
+}
+
+export function error(message: string) {
+    console.error(`%cError: %c${message}`, "color: red;", "");
+}
+
+export function warning(message: string) {
+    console.warn(`%cWarning: %c${message}`, "color: yellow;", "");
+}
+
+export function note(message: string) {
+    console.warn(`\t%c${message}`, "color: black;");
+}
+
+function levenshteinDistance(a: string, b: string): number {
+    const dp: number[][] = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
+
+    for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+
+    for (let i = 1; i <= a.length; i++) {
+        for (let j = 1; j <= b.length; j++) {
+            dp[i][j] = a[i - 1] === b[j - 1]
+                ? dp[i - 1][j - 1]
+                : Math.min(dp[i - 1][j - 1], dp[i][j - 1], dp[i - 1][j]) + 1;
+        }
+    }
+
+    return dp[a.length][b.length];
+}
+
+export function suggestArgument(arg: string) {
+    const validArgs = ["-h", "--help", "-V", "--version", "-i", "--input", "-o", "--output", "-W"];
+    let bestMatch: string | undefined = undefined;
+    let minDistance = Infinity;
+    for (const validArg of validArgs) {
+        const lowerDistance = levenshteinDistance(arg.toLowerCase(), validArg);
+        const upperDistance = levenshteinDistance(arg.toUpperCase(), validArg);
+        const distance = Math.min(lowerDistance, upperDistance);
+        if (distance < minDistance && distance <= 2) {
+            minDistance = distance;
+            bestMatch = validArg;
+        }
+    }
+    return bestMatch;
+}
+
+if (Deno.args.length === 0) {
+    help();
+    console.log();
+    error("Expected -h, --help, -V, --version, -i, --input, -o, or --output");
+    Deno.exit(0);
+}
+let fileWatchingMode: boolean = false;
+const inputPaths = [];
+let index = 0;
+do {
+    const arg = Deno.args.at(index);
+    switch (arg) {
+        case "-W": {
+            if (fileWatchingMode) {
+                warning("Flag '-W' set multiple times");
+                note("File watching mode is already enabled");
+            }
+            fileWatchingMode = true;
+            break;
+        }
+        case "-h":
+        case "--help": {
+            help();
+            Deno.exit(0);
+            break;
+        }
+        case "-V":
+        case "--version": {
+            console.log(`Caeruleus ${VERSION}`);
+            Deno.exit(0);
+            break;
+        }
+        case "-i":
+        case "--input": {
+            const input = Deno.args.at(++index);
+            if (input === undefined) {
+                fatalError(`Expected input file path after '${arg}' argument`);
+            }
+            let output = `./output/${input}`;
+            const outputArg = Deno.args.at(index + 1);
+            if (outputArg === "-o" || outputArg === "--output") {
+                const outputArgOutput = Deno.args.at(index += 2);
+                if (outputArgOutput === undefined) {
+                    fatalError(`Expected output file path after '${outputArg}' argument (from '${arg}' argument)`);
+                }
+                output = outputArgOutput;
+            }
+            inputPaths.push([input, output]);
+            break;
+        }
+        case "-o":
+        case "--output": {
+            const output = Deno.args.at(++index);
+            if (output === undefined) {
+                fatalError(`Expected output file path after '${arg}' argument`);
+            }
+            inputPaths.push([".", output]);
+            break;
+        }
+        default: {
+            warning(
+                `Unknown argument '${arg}' encountered, expected -h, --help, -V, --version, -i, --input, -o, or --output`,
+            );
+            const suggestion = suggestArgument(arg as string);
+            if (suggestion) {
+                note(`Did you mean '${suggestion}'?`);
+            }
+            break;
+        }
+    }
+} while (++index < Deno.args.length);
+
+export async function getAliases(): Promise<Aliases> {
     try {
-        const fileInfo = Deno.lstatSync(filePath);
-        if (fileInfo.isFile) {
-            return Deno.realPathSync(filePath);
-        }
-    } catch (error) {
-        if (!(error instanceof Deno.errors.NotFound)) {
-            throw error;
-        }
-    };
-    return undefined;
+        const luaurc = await Deno.readTextFile(".luaurc");
+        const json = JSON.parse(luaurc);
+        if (json.aliases) return Aliases.fromJson(json);
+    } catch (err) {
+        warning("Couldn't get aliases from .luaurc");
+        error(`${err}`);
+    }
+    return new Aliases();
 }
 
-type InstanceObject = {
-    name: string,
-    className: string,
-    filePaths: string[],
-    children: InstanceObject[],
-}
+const aliases: Aliases = await getAliases();
 
-export class Instance {
-    public constructor(name: string, className: string, filePaths?: string[], parent?: Instance, children?: Instance[]) {
-        this.m_name = name;
-        this.m_className = className;
-        this.m_filePaths = filePaths ?? [];
-        this.m_parent = parent;
-        this.m_children = children ?? [];
-        if (parent) parent.children.push(this);
-    }
-
-    public static fromObject(object: InstanceObject, parent?: Instance): Instance {
-        const instance = new Instance(object.name, object.className, object.filePaths, parent);
-        if (object.children) {
-            for (const child of object.children) {
-                Instance.fromObject(child, instance);
-            }
-        }
-        return instance;
-    }
-
-    public static fromJson(json: string): Instance {
-        const object = JSON.parse(json);
-        return Instance.fromObject(object);
-    }
-
-    private m_name: string;
-
-    public get name(): string {
-        return this.m_name
-    }
-
-    private m_className: string;
-
-    public get className(): string {
-        return this.m_className
-    }
-
-    private m_filePaths: string[];
-
-    public get filePaths(): string[] {
-        return this.m_filePaths
-    }
-
-    private m_parent?: Instance = undefined;
-
-    public set parent(parent: Instance) {
-        if (this.m_parent) {
-            const index = this.m_parent.children.lastIndexOf(this);
-            if (index >= 0) {
-                this.m_parent.children[index] = this.m_parent.children[this.m_parent.children.length - 1]
-                this.m_parent.children.pop()
-            }
-        }
-        this.m_parent = parent
-    }
-
-    public get parent(): Instance | undefined {
-        return this.m_parent;
-    }
-
-    private m_children: Instance[] = [];
-
-    public get children(): Instance[] {
-        return this.m_children
-    }
-
-    public find(instance: Instance): string | undefined {
-        const thisParents = [];
-        const instanceParents = []
-
-        {
-            // deno-lint-ignore no-this-alias
-            let thisParent: Instance | undefined = this;
-            do {
-                thisParents.push(thisParent);
-                thisParent = thisParent.parent;
-            } while (thisParent)
-        }
-
-        {
-            let instanceParent: Instance | undefined = instance;
-            do {
-                instanceParents.push(instanceParent);
-                instanceParent = instanceParent.parent;
-            } while (instanceParent)
-        }
-
-        let root = thisParents.pop()
-
-        if (root !== instanceParents.pop()) {
-            return undefined;
-        }
-
-        while (thisParents.length > 0 && instanceParents.length > 0 && thisParents.at(-1) === instanceParents.at(-1)) {
-            root = thisParents.pop();
-            instanceParents.pop();
-        }
-
-        let path = `script${".Parent".repeat(thisParents.length)}`;
-
-        while (instanceParents.length > 0) {
-            path += `:FindFirstChild("${instanceParents.pop()?.name}")`;
-        }
-
-        return path;
+export async function getSourceMap(): Promise<SourceMap> {
+    try {
+        const sourceMapJson = await Deno.readTextFile("sourcemap.json");
+        const json = JSON.parse(sourceMapJson);
+        return SourceMap.fromJson(json);
+    } catch (err) {
+        warning("Couldn't get source map from sourcemap.json");
+        fatalError(`${err}`);
     }
 }
 
-export class Sourcemap {
-    public constructor(root: Instance) {
-        this.m_root = root;
-        this.setFilePaths();
-    }
+const sourceMap: SourceMap = await getSourceMap();
 
-    public static fromObject(object: InstanceObject) {
-        const root = Instance.fromObject(object);
-        return new Sourcemap(root);
-    }
-
-    public static fromJson(json: string): Sourcemap {
-        const object = JSON.parse(json);
-        return Sourcemap.fromObject(object);
-    }
-
-    private m_root?: Instance = undefined;
-
-    public get root(): Instance | undefined {
-        return this.m_root
-    }
-
-    private m_filePathMap: Map<string, [Instance]> = new Map();
-
-    public get(filePath: string): Instance[] | undefined {
-        return this.m_filePathMap.get(filePath)
-    }
-
-    public async setFilePaths(instance: Instance | undefined = this.m_root) {
-        if (instance === undefined) {
-            return;
-        }
-        for (const filePath of instance.filePaths) {
-            try {
-                const realFilePath = await Deno.realPath(filePath);
-                const instances = this.m_filePathMap.get(realFilePath);
-                if (instances === undefined) {
-                    this.m_filePathMap.set(realFilePath, [instance]);
-                } else if (!instances.includes(instance)) {
-                    instances.push(instance);
-                }
-            } catch (error) {
-                if (!(error instanceof Deno.errors.NotFound)) {
-                    throw error;
-                }
-            }
-        }
-        for (const child of instance.children) {
-            await this.setFilePaths(child);
-        }
-    }
-
-    public async replaceRequires(filePath: string, aliases?: Map<string, string>) {
-        const fileInstance = this.m_filePathMap.get(filePath)?.[0]
-        if (fileInstance === undefined) {
-            console.error(`Couldn't get instance associated with path '${filePath}'`);
-            return;
-        }
-        const luau = await Deno.readTextFile(filePath);
-        const replacedRequires = luau.replaceAll(/\brequire\("(.*?)"\)\B/g, (_, requirePath: string): string => {
-            if (aliases && requirePath.startsWith("@")) {
-                const [alias, ...other] = requirePath.substring(1).split("/", 1);
-                const replacement = aliases.get(alias);
-                if (replacement !== undefined) {
-                    requirePath = path.join(replacement, ...other);
-                } else {
-                    console.warn(`Couldn't get alias '@${alias}', are you sure it exists?`);
-                }
-            }
-            const virtualFilePath = path.isAbsolute(requirePath) ? requirePath : path.join(path.dirname(filePath), requirePath)
-            const otherFilePath =
-                getLuauRealPath(virtualFilePath)
-                ?? getLuauRealPath(`${virtualFilePath}.luau`)
-                ?? getLuauRealPath(path.join(virtualFilePath, "init.luau"));
-            if (otherFilePath == undefined) {
-                console.error(`Couldn't find file path '${requirePath}', required by '${filePath}'`);
-                return `require("${requirePath}")`;
-            }
-            const otherInstance = this.m_filePathMap.get(otherFilePath)?.[0];
-            if (otherInstance === undefined) {
-                console.error(`Couldn't get instance associated with path '${otherFilePath}' (${requirePath}), required by '${filePath}'`);
-                return `require("${requirePath}")`;
-            }
-            const route = fileInstance.find(otherInstance);
-            return route ? `require(${route})` : "error(\"unreachable\")";
-        });
-        await Deno.writeTextFile(filePath, replacedRequires);
-    }
-}
-
-if (import.meta.main) {
-    const INPUT = Deno.args.slice(1);
-    const OUTPUT = "output";
-
-    for (const input of INPUT) {
-        const output = path.join(OUTPUT, input);
+for (const [input, output] of inputPaths) {
+    try {
         await fs.emptyDir(output);
+    } catch (err) {
+        warning(`Couldn't empty output directory '${output}'`);
+        error(`${err}`);
+    }
+    try {
         await fs.copy(input, output, { overwrite: true });
+    } catch (err) {
+        warning(`Couldn't copy '${input}' to '${output}'`);
+        error(`${err}`);
     }
-
-    const luaurc = await Deno.readTextFile(".luaurc");
-    const luaurcJson = JSON.parse(luaurc);
-    const aliases = new Map();
-
-    if (luaurcJson.aliases !== undefined) {
-        for (const alias in luaurcJson.aliases) {
-            aliases.set(alias, await Deno.realPath(luaurcJson.aliases[alias]));
-        }
-    }
-
-    const sourcemap = Sourcemap.fromJson(await Deno.readTextFile("sourcemap.json"));
-
-    for await (const dirEntry of fs.walk(OUTPUT)) {
-        if (!dirEntry.isFile || path.extname(dirEntry.name) !== ".luau") {
-            continue;
-        }
-        const filePath = await Deno.realPath(dirEntry.path);
-        await sourcemap.replaceRequires(filePath, aliases);
-    }
-
-    const events = Deno.watchFs(INPUT, { recursive: true });
-
-    for await (const event of events) {
-        const inputPath = event.paths[0];
-        const relativeInputPath = path.relative("./", inputPath);
-        const relativeOutputPath = path.join(OUTPUT, relativeInputPath);
-        const outputPath = path.join(Deno.cwd(), relativeOutputPath);
-        switch (event.kind) {
-            case "create":
-            case "rename":
-            case "modify": {
-                await Deno.copyFile(inputPath, outputPath);
-                if (path.extname(relativeInputPath) == ".luau") {
-                    await sourcemap.replaceRequires(outputPath, aliases);
-                }
-                console.log(`Update '${relativeOutputPath}' ('${relativeInputPath}')`);
-                break;
+    for await (const inputEntry of fs.walk(input, { exts: [".luau"] })) {
+        const relativePath = path.relative(input, inputEntry.path);
+        const inputPath = path.resolve(CWD, input, relativePath);
+        const outputPath = path.resolve(CWD, output, relativePath);
+        try {
+            const script = sourceMap.filePaths.get(inputPath)?.[0];
+            if (script === undefined) {
+                error(`Couldn't get script at path '${inputPath}'`);
+                continue;
             }
-
-            case "remove": {
-                await Deno.remove(outputPath, { recursive: true });
-                console.log(`Remove '${relativeOutputPath}'`);
-                break;
-            }
+            const scriptContent = await Deno.readTextFile(inputPath);
+            const replacedRequires = replaceRequires(scriptContent, script, inputPath, sourceMap, aliases);
+            await Deno.writeTextFile(outputPath, replacedRequires);
+        } catch (err) {
+            warning(`Couldn't update '${inputPath}' to '${outputPath}'`);
+            error(`${err}`);
         }
     }
 }
