@@ -14,7 +14,6 @@ export function replaceRequires(
         /\brequire\s*\(\s*"([^"]*?)"\s*\)\B/g,
         (_, requirePath: string): string => {
             const [head, ...tail] = requirePath.split(/\/|\\/);
-            console.log(head);
             if (head.startsWith("@")) {
                 const alias = head.substring(1);
                 const aliasPath = aliases.getAlias(alias);
