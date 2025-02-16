@@ -1,6 +1,6 @@
 import { Aliases } from "../lib/aliases.ts";
 import { replaceRequires } from "../lib/script.ts";
-import { SourceMap, SourceMapEntry } from "../lib/source_map.ts";
+import { SourceMap } from "../lib/source_map.ts";
 
 import * as path from "jsr:@std/path";
 import * as fs from "jsr:@std/fs";
