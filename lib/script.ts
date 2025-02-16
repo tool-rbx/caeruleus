@@ -21,7 +21,7 @@ export function replaceRequires(
                     requirePath = path.resolve(aliasPath, ...tail);
                 }
             }
-            requirePath = path.isAbsolute(requirePath) ? requirePath : path.join(scriptPath, requirePath);
+            requirePath = path.isAbsolute(requirePath) ? requirePath : path.join(path.dirname(scriptPath), requirePath);
             const required =
                    sourceMap.filePaths.get(`${requirePath}.luau`)?.[0]
                 ?? sourceMap.filePaths.get(path.join(requirePath, "init.luau"))?.[0]
