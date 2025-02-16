@@ -4,6 +4,7 @@ import { SourceMap } from "../lib/source_map.ts";
 
 import * as path from "jsr:@std/path";
 import * as fs from "jsr:@std/fs";
+import { debounce } from "jsr:@std/async/debounce";
 
 const CWD: string = Deno.cwd();
 
@@ -79,7 +80,7 @@ function levenshteinDistance(a: string, b: string): number {
 }
 
 export function suggestArgument(arg: string) {
-    const validArgs = ["-h", "--help", "-V", "--version", "-i", "--input", "-o", "--output", "-W"];
+    const validArgs = ["-h", "--help", "-V", "--version", "-W", "-i", "--input", "-o", "--output"];
     let bestMatch: string | undefined = undefined;
     let minDistance = Infinity;
     for (const validArg of validArgs) {
@@ -97,11 +98,11 @@ export function suggestArgument(arg: string) {
 if (Deno.args.length === 0) {
     help();
     console.log();
-    error("Expected -h, --help, -V, --version, -i, --input, -o, or --output");
+    error("Expected -h, --help, -V, --version, -W, -i, --input, -o, or --output");
     Deno.exit(0);
 }
 let fileWatchingMode: boolean = false;
-const inputPaths = [];
+const inputPaths: [string, string][] = [];
 let index = 0;
 do {
     const arg = Deno.args.at(index);
@@ -155,7 +156,7 @@ do {
         }
         default: {
             warning(
-                `Unknown argument '${arg}' encountered, expected -h, --help, -V, --version, -i, --input, -o, or --output`,
+                `Unknown argument '${arg}' encountered, expected -h, --help, -V, --version, -W, -i, --input, -o, or --output`,
             );
             const suggestion = suggestArgument(arg as string);
             if (suggestion) {
@@ -178,7 +179,7 @@ export async function getAliases(): Promise<Aliases> {
     return new Aliases();
 }
 
-const aliases: Aliases = await getAliases();
+let aliases: Aliases = await getAliases();
 
 export async function getSourceMap(): Promise<SourceMap> {
     try {
@@ -191,7 +192,7 @@ export async function getSourceMap(): Promise<SourceMap> {
     }
 }
 
-const sourceMap: SourceMap = await getSourceMap();
+let sourceMap: SourceMap = await getSourceMap();
 
 for (const [input, output] of inputPaths) {
     try {
@@ -206,22 +207,133 @@ for (const [input, output] of inputPaths) {
         warning(`Couldn't copy '${input}' to '${output}'`);
         error(`${err}`);
     }
-    for await (const inputEntry of fs.walk(input, { exts: [".luau"] })) {
-        const relativePath = path.relative(input, inputEntry.path);
-        const inputPath = path.resolve(CWD, input, relativePath);
-        const outputPath = path.resolve(CWD, output, relativePath);
-        try {
-            const script = sourceMap.filePaths.get(inputPath)?.[0];
-            if (script === undefined) {
-                error(`Couldn't get script at path '${inputPath}'`);
-                continue;
+}
+
+export async function run(inputPaths: [string, string][]) {
+    for (const [input, output] of inputPaths) {
+        for await (const inputEntry of fs.walk(input, { exts: [".luau"] })) {
+            const relativePath = path.relative(input, inputEntry.path);
+            const inputPath = path.resolve(CWD, input, relativePath);
+            const outputPath = path.resolve(CWD, output, relativePath);
+            try {
+                const script = sourceMap.filePaths.get(inputPath)?.[0];
+                if (script === undefined) {
+                    error(`Couldn't get script at path '${inputPath}'`);
+                    continue;
+                }
+                const scriptContent = await Deno.readTextFile(inputPath);
+                const replacedRequires = replaceRequires(scriptContent, script, inputPath, sourceMap, aliases);
+                await Deno.writeTextFile(outputPath, replacedRequires);
+            } catch (err) {
+                warning(`Couldn't update '${inputPath}' to '${outputPath}'`);
+                error(`${err}`);
             }
-            const scriptContent = await Deno.readTextFile(inputPath);
-            const replacedRequires = replaceRequires(scriptContent, script, inputPath, sourceMap, aliases);
-            await Deno.writeTextFile(outputPath, replacedRequires);
-        } catch (err) {
-            warning(`Couldn't update '${inputPath}' to '${outputPath}'`);
-            error(`${err}`);
         }
     }
+}
+
+await run(inputPaths);
+
+if (!fileWatchingMode) Deno.exit(0);
+
+export async function watchAliases() {
+    const events = Deno.watchFs(".luaurc");
+
+    const setAliases = debounce(async (event: Deno.FsEvent) => {
+        switch (event.kind) {
+            case "create":
+            case "modify":
+            case "rename":
+            case "remove": {
+                console.log("%cInfo: %c.luaurc file updated", "color: green; font-weight: bold;", "");
+                aliases = await getAliases();
+                await run(inputPaths);
+                break;
+            }
+        }
+    }, 100);
+
+    for await (const event of events) {
+        setAliases(event);
+    }
+}
+
+watchAliases();
+
+export async function watchSourceMap() {
+    const events = Deno.watchFs("sourcemap.json");
+
+    const setSourceMap = debounce(async (event: Deno.FsEvent) => {
+        switch (event.kind) {
+            case "create":
+            case "modify":
+            case "rename":
+            case "remove": {
+                console.log("%cInfo: %csourcemap.json file updated", "color: green; font-weight: bold;", "");
+                sourceMap = await getSourceMap();
+                await run(inputPaths);
+                break;
+            }
+        }
+    }, 100);
+
+    for await (const event of events) {
+        setSourceMap(event);
+    }
+}
+
+watchSourceMap();
+
+export async function watchInputPath(input: string, output: string) {
+    const events = Deno.watchFs(input, { recursive: true });
+
+    const onInputPathChanged = debounce(async (event: Deno.FsEvent) => {
+        const relativePath = path.relative(input, event.paths[0]);
+        const inputPath = path.resolve(CWD, input, relativePath);
+        const outputPath = path.resolve(CWD, output, relativePath);
+        switch (event.kind) {
+            case "create":
+            case "modify": {
+                console.log(`%cInfo: %c'${inputPath}' file updated`, "color: green; font-weight: bold;", "");
+                if (path.extname(inputPath) === ".luau") {
+                    try {
+                        const script = sourceMap.filePaths.get(inputPath)?.[0];
+                        if (script === undefined) {
+                            error(`Couldn't get script at path '${inputPath}'`);
+                            return;
+                        }
+                        const scriptContent = await Deno.readTextFile(inputPath);
+                        const replacedRequires = replaceRequires(scriptContent, script, inputPath, sourceMap, aliases);
+                        await Deno.writeTextFile(outputPath, replacedRequires);
+                    } catch (err) {
+                        warning(`Couldn't update '${inputPath}' to '${outputPath}'`);
+                        error(`${err}`);
+                    }
+                } else {
+                    await fs.copy(inputPath, outputPath, { overwrite: true });
+                }
+                break;
+            }
+
+            case "remove": {
+                console.log(`%cInfo: %c'${inputPath}' file removed`, "color: green; font-weight: bold;", "");
+                try {
+                    await Deno.remove(outputPath);
+                } catch (err) {
+                    if (!(err instanceof Deno.errors.NotFound)) {
+                        throw err;
+                    }
+                }
+                break;
+            }
+        }
+    }, 100);
+
+    for await (const event of events) {
+        onInputPathChanged(event);
+    }
+}
+
+for (const [input, output] of inputPaths) {
+    watchInputPath(input, output);
 }
